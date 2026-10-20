@@ -6,8 +6,10 @@ What it does, each step skipped when it is already done:
 
   1. checks the Mac: Apple Silicon, the chip, unified memory, macOS version, the Command Line Tools, free disk
   2. recommends a model by memory (recommend, never force: an explicit --model is kept, with what it risks)
-  3. installs the Python packages into .venv (cmake and ninja come from pip: no Homebrew, no sudo)
-  4. builds the Metal engine from source: metal-cpp (Apple's headers) and llama.cpp's ggml at the pinned commit
+  3. installs the Python packages into .venv
+  4. builds the Metal engine from source: metal-cpp (Apple's headers) and llama.cpp's ggml at the pinned commit, with
+     cmake and ninja from PATH or, when missing, requirements-build.txt's pins installed into .venv (no Homebrew,
+     no sudo)
   5. downloads the model (setup.py's downloader: resumable, the pinned revision)
   6. prepares the model: the native pack (tools/iq_pack.py) and the MTP draft layer (tools/mtp_fetch.py, mtp_pack.py)
   7. writes strata-<model>.json and run-<model>.sh with the Metal defaults (--spec 2, the Q8_0 hyper-connection
@@ -101,6 +103,18 @@ def tool(name: str) -> str:
     return str(p) if p.exists() else (shutil.which(name) or name)
 
 
+def build_tools() -> None:
+    """cmake and ninja before a compile, as setup.py's cmake_build does: the ones on PATH or in .venv, else
+    requirements-build.txt's pinned helpers installed into .venv (requirements.txt no longer carries them)."""
+    packages = S.requirement_lines(S.BUILD_REQUIREMENTS) if S.BUILD_REQUIREMENTS.exists() else S.BUILD_PACKAGES
+    missing = [p for p in packages if S.find_tool(S.req_name(p)) is None]
+    if missing:
+        S.pip_install(missing, "CMake and Ninja build tools")
+    if S.find_tool("cmake") is None or S.find_tool("ninja") is None:
+        S.fail("cmake / ninja not found after installing them",
+               "run: .venv/bin/python -m pip install -r requirements-build.txt")
+
+
 def engine_current() -> bool:
     try:
         meta = json.loads((BUILD_DIR / "BUILD.json").read_text(encoding="utf-8"))
@@ -122,10 +136,11 @@ def source_digest() -> str:
 
 
 def build_engine(llama: Path, jobs: int | None = None) -> Path:
-    """The Metal engine from source: cmake + ninja (pip's), Apple's clang from the Command Line Tools."""
+    """The Metal engine from source: cmake + ninja (build_tools), Apple's clang from the Command Line Tools."""
     if engine_current():
         S.ok(f"Metal engine: {EXE} (built for this source)")
         return EXE
+    build_tools()
     mcpp = metal_cpp()
     S.say("  Building the Metal engine from source (5-15 minutes the first time) ...")
     BUILD_DIR.mkdir(exist_ok=True)
@@ -170,6 +185,7 @@ def build_vision(llama: Path) -> Path:
             return VISION_EXE
     except (OSError, ValueError):
         pass
+    build_tools()
     S.say("  Building the image encoder (1-3 minutes) ...")
     env = dict(os.environ, PATH=str(Path(sys.executable).parent) + os.pathsep + os.environ.get("PATH", ""))
     log = ROOT / "build-vision.log"
@@ -416,9 +432,9 @@ def main(argv=None) -> int:
     if free < need:
         S.warn(f"about {need:.0f} GB are needed on the disk ({free:.0f} GB free): kept as you chose; it may run out")
 
-    # ---- 3. Python packages (cmake and ninja among them: the engine build's tools)
+    # ---- 3. Python packages (the runtime ones: cmake and ninja come with a compile, in build_tools)
     S.step(3, "Python packages")
-    S.pip_install(S.requirement_lines() if S.REQUIREMENTS.exists() else S.PY_PACKAGES, "numpy, jinja2, ..., cmake, ninja")
+    S.pip_install(S.requirement_lines() if S.REQUIREMENTS.exists() else S.PY_PACKAGES, "numpy, jinja2, ...")
 
     # ---- 4. the engine
     S.step(4, "the Strata engine (Metal)")

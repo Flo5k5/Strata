@@ -127,6 +127,47 @@ class Vision(unittest.TestCase):
         self.assertIn('cfg["args"] += ["--vision"]', src)
 
 
+class BuildTools(unittest.TestCase):
+    """cmake and ninja are in requirements-build.txt, not requirements.txt: a fresh .venv has neither, and the
+    engine and image encoder builds install the missing ones first (as setup.py's cmake_build does)."""
+
+    def run_build_tools(self, on_path):
+        installed = []
+
+        def find_tool(name):
+            return f"/bin/{name}" if name in on_path or any(setup.req_name(p) == name for p in installed) else None
+
+        def pip_install(packages, what, extra=()):
+            installed.extend(packages)
+        with mock.patch.object(setup, "find_tool", find_tool), mock.patch.object(setup, "pip_install", pip_install):
+            M.build_tools()
+        return installed
+
+    def test_a_fresh_venv_gets_the_pinned_helpers(self):
+        pins = setup.requirement_lines(setup.BUILD_REQUIREMENTS)
+        self.assertEqual(sorted(setup.req_name(p) for p in pins), ["cmake", "ninja"])
+        self.assertEqual(self.run_build_tools(on_path=()), pins)
+
+    def test_only_the_missing_one_is_installed(self):
+        self.assertEqual([setup.req_name(p) for p in self.run_build_tools(on_path=("cmake",))], ["ninja"])
+        self.assertEqual(self.run_build_tools(on_path=("cmake", "ninja")), [])
+
+    def test_the_runtime_requirements_do_not_carry_them(self):
+        names = {setup.req_name(p) for p in setup.requirement_lines()}
+        self.assertFalse(names & {"cmake", "ninja"})
+
+    def test_both_builds_get_the_tools_first(self):
+        class Stop(Exception):
+            pass
+        with mock.patch.object(M, "build_tools", side_effect=Stop), mock.patch.object(M, "engine_current", lambda: False), \
+                mock.patch.object(M, "metal_cpp", side_effect=AssertionError("build_tools comes first")):
+            self.assertRaises(Stop, M.build_engine, Path("llama"))
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(M, "build_tools", side_effect=Stop), \
+                mock.patch.object(M, "ROOT", Path(tmp)), mock.patch.object(M, "VISION_EXE", Path(tmp) / "none"), \
+                mock.patch.object(setup, "say", side_effect=AssertionError("build_tools comes first")):
+            self.assertRaises(Stop, M.build_vision, Path("llama"))
+
+
 class ExpertsFile(unittest.TestCase):
     """The streaming Mac's <model>.experts: written only with room on the disk, else a warning and the GGUF."""
 
